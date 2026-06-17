@@ -10,6 +10,11 @@ Data sources:
 Both files go in the same directory as this file.
 If either is missing the app still runs — results fall back to synthetic
 data and rankings fall back to a neutral default of 50.
+
+Deployment:
+  Run once locally (with results.csv present) → model_artifacts/ is created.
+  Commit model_artifacts/ to your repo → Streamlit Cloud loads from disk,
+  never needs results.csv or fifa_rankings.csv.
 """
 
 import os
@@ -21,6 +26,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 from xgboost import XGBClassifier
 from collections import Counter
+import joblib
 import streamlit as st
 
 warnings.filterwarnings("ignore")
@@ -28,6 +34,14 @@ warnings.filterwarnings("ignore")
 DATA_PATH     = "results.csv"
 RANKINGS_PATH = "fifa_rankings.csv"
 WINDOW        = 15   # rolling form window
+
+# ── Saved artifact paths (commit these to repo for zero-retraining deploys) ───
+ARTIFACTS_DIR    = "model_artifacts"
+MODEL_FILE       = os.path.join(ARTIFACTS_DIR, "xgb_model.json")
+ENCODER_FILE     = os.path.join(ARTIFACTS_DIR, "label_encoder.pkl")
+FEATURE_COL_FILE = os.path.join(ARTIFACTS_DIR, "feature_cols.pkl")
+DF_FILE          = os.path.join(ARTIFACTS_DIR, "match_data.parquet")
+RANKINGS_FILE    = os.path.join(ARTIFACTS_DIR, "rankings_data.parquet")
 
 # ── 2026 World Cup nations ────────────────────────────────────────────────────
 TEAM_LIST = sorted([
@@ -108,7 +122,6 @@ def load_rankings() -> pd.DataFrame | None:
     if not os.path.exists(RANKINGS_PATH):
         return None
     rk = pd.read_csv(RANKINGS_PATH, parse_dates=["rank_date"])
-    # Kaggle CSV columns: rank_date, country_full, rank, total_points
     rk = rk[["rank_date", "country_full", "rank"]].dropna()
     rk = rk.sort_values("rank_date").reset_index(drop=True)
     return rk
@@ -123,7 +136,7 @@ def _get_ranking(team: str, date, rankings: pd.DataFrame | None) -> float:
         (rankings["rank_date"] <= date)
     ]
     if len(past) == 0:
-        return 100.0   # unranked / not in dataset → assume weaker side
+        return 100.0
     return float(past.iloc[-1]["rank"])
 
 
@@ -132,7 +145,6 @@ def _get_ranking(team: str, date, rankings: pd.DataFrame | None) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _team_rolling_stats(df: pd.DataFrame, team: str, before_date) -> dict:
-    """Rolling form stats for `team` across the last WINDOW matches before `before_date`."""
     mask   = (
         ((df["home_team"] == team) | (df["away_team"] == team)) &
         (df["date"] < before_date)
@@ -200,10 +212,7 @@ def build_features(
     df: pd.DataFrame,
     rankings: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Row-wise feature engineering.
-    Only uses data available strictly before each match (no leakage).
-    """
+    """Row-wise feature engineering. Only uses data before each match (no leakage)."""
     records = []
     for _, row in df.iterrows():
         hs  = _team_rolling_stats(df, row["home_team"], row["date"])
@@ -212,13 +221,12 @@ def build_features(
         tw  = TOURNAMENT_WEIGHT.get(row.get("tournament", "Friendly"), 1.0)
         nv  = int(row.get("neutral", False))
 
-        # FIFA rankings
         home_rank  = _get_ranking(row["home_team"], row["date"], rankings)
         away_rank  = _get_ranking(row["away_team"], row["date"], rankings)
-        rank_delta = away_rank - home_rank   # positive = home team ranked better
+        rank_delta = away_rank - home_rank
 
         records.append({
-            # ── Home form ────────────────────────────────────────────────────
+            # Home form
             "home_win_rate":  hs["win_rate"],
             "home_draw_rate": hs["draw_rate"],
             "home_loss_rate": hs["loss_rate"],
@@ -226,7 +234,7 @@ def build_features(
             "home_avg_ga":    hs["avg_ga"],
             "home_goal_diff": hs["goal_diff"],
             "home_games":     hs["games"],
-            # ── Away form ────────────────────────────────────────────────────
+            # Away form
             "away_win_rate":  as_["win_rate"],
             "away_draw_rate": as_["draw_rate"],
             "away_loss_rate": as_["loss_rate"],
@@ -234,28 +242,26 @@ def build_features(
             "away_avg_ga":    as_["avg_ga"],
             "away_goal_diff": as_["goal_diff"],
             "away_games":     as_["games"],
-            # ── Differentials ────────────────────────────────────────────────
-            "win_rate_diff":  hs["win_rate"]   - as_["win_rate"],
-            "goal_diff_diff": hs["goal_diff"]  - as_["goal_diff"],
-            "avg_gf_diff":    hs["avg_gf"]     - as_["avg_gf"],
-            "avg_ga_diff":    hs["avg_ga"]     - as_["avg_ga"],
-            # ── Head-to-head ─────────────────────────────────────────────────
+            # Differentials
+            "win_rate_diff":  hs["win_rate"]  - as_["win_rate"],
+            "goal_diff_diff": hs["goal_diff"] - as_["goal_diff"],
+            "avg_gf_diff":    hs["avg_gf"]    - as_["avg_gf"],
+            "avg_ga_diff":    hs["avg_ga"]    - as_["avg_ga"],
+            # Head-to-head
             "h2h_home_win_rate": h2h["h2h_home_win_rate"],
             "h2h_draw_rate":     h2h["h2h_draw_rate"],
             "h2h_away_win_rate": h2h["h2h_away_win_rate"],
             "h2h_total":         h2h["h2h_total"],
-            # ── Context ──────────────────────────────────────────────────────
+            # Context
             "tournament_weight": tw,
             "neutral_venue":     nv,
-            # ── Draw-signal features ─────────────────────────────────────────
-            # "combined_draw_tendency": (hs["draw_rate"] + as_["draw_rate"]) / 2,
-            # "combined_avg_goals":      hs["avg_gf"] + as_["avg_gf"],
-            "form_closeness":          abs(hs["win_rate"] - as_["win_rate"]),
-            # ── FIFA ranking features (biggest new signal) ───────────────────
-            "home_rank":   home_rank,
-            "away_rank":   away_rank,
-            "rank_delta":  rank_delta,   # key feature: quality gap between teams
-            # ── Target ───────────────────────────────────────────────────────
+            # Draw-signal
+            "form_closeness": abs(hs["win_rate"] - as_["win_rate"]),
+            # FIFA rankings
+            "home_rank":  home_rank,
+            "away_rank":  away_rank,
+            "rank_delta": rank_delta,
+            # Target
             "outcome": row["outcome"],
         })
 
@@ -265,11 +271,49 @@ def build_features(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ARTIFACT SAVE / LOAD
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _artifacts_exist() -> bool:
+    """True only when every artifact file is present on disk."""
+    return all(os.path.exists(p) for p in [
+        MODEL_FILE, ENCODER_FILE, FEATURE_COL_FILE, DF_FILE,
+    ])
+
+
+def _save_artifacts(clf, df, rankings, feature_cols, le):
+    """Persist everything to disk so Streamlit Cloud never needs to retrain."""
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    clf.save_model(MODEL_FILE)
+    joblib.dump(le,           ENCODER_FILE)
+    joblib.dump(feature_cols, FEATURE_COL_FILE)
+    df.to_parquet(DF_FILE, index=False)
+    if rankings is not None:
+        rankings.to_parquet(RANKINGS_FILE, index=False)
+    print(f"✅ Artifacts saved to {ARTIFACTS_DIR}/")
+
+
+def _load_artifacts():
+    """Load pre-trained artifacts from disk — no CSV files required."""
+    clf = XGBClassifier()
+    clf.load_model(MODEL_FILE)
+    le           = joblib.load(ENCODER_FILE)
+    feature_cols = joblib.load(FEATURE_COL_FILE)
+    df           = pd.read_parquet(DF_FILE)
+    rankings     = (
+        pd.read_parquet(RANKINGS_FILE)
+        if os.path.exists(RANKINGS_FILE) else None
+    )
+    print("✅ Loaded pre-trained artifacts from disk")
+    return clf, df, rankings, feature_cols, le
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TRAINING
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner=False)
-def load_or_train_model():
+def _train_and_save() -> tuple:
+    """Full training pipeline. Saves artifacts to disk when done."""
     df       = load_data()
     rankings = load_rankings()
 
@@ -281,10 +325,9 @@ def load_or_train_model():
 
     df = df[df["year"] >= 2000].copy()
 
-    with st.spinner("Engineering features — runs once per session..."):
-        # Recency weighting — 2024 matches matter more than 2000 matches
+    with st.spinner("Engineering features — runs once, then saved to disk..."):
         df["recency_weight"] = (df["year"] - 2000 + 1) ** 1.5
-        w = df["recency_weight"] / df["recency_weight"].sum()
+        w      = df["recency_weight"] / df["recency_weight"].sum()
         sample = df.sample(min(len(df), 8000), weights=w, random_state=42)
         feat_df, feature_cols = build_features(sample, rankings)
 
@@ -302,7 +345,6 @@ def load_or_train_model():
     print("Label mapping    :", dict(enumerate(le.classes_)))
     print("Train distribution:", Counter(y_train))
 
-    # Class-balanced sample weights — cleaner than SMOTE for this problem
     classes, counts = np.unique(y_train, return_counts=True)
     weight_map      = {c: len(y_train) / (len(classes) * cnt)
                        for c, cnt in zip(classes, counts)}
@@ -329,13 +371,35 @@ def load_or_train_model():
     feat_imp = pd.Series(clf.feature_importances_, index=feature_cols).sort_values(ascending=False)
     print(feat_imp.head(12))
 
+    _save_artifacts(clf, df, rankings, feature_cols, le)
     return clf, df, rankings, feature_cols, le
+
+
+@st.cache_resource(show_spinner=False)
+def load_or_train_model():
+    """
+    Load from saved artifacts if present (fast, no CSVs needed).
+    Train from scratch only when artifacts folder is missing.
+    """
+    if _artifacts_exist():
+        return _load_artifacts()
+
+    # No artifacts — need results.csv to train
+    if not os.path.exists(DATA_PATH):
+        st.error(
+            "❌ **Cannot start:** `model_artifacts/` not found and `results.csv` is missing.\n\n"
+            "**To fix:**\n"
+            "- Add `results.csv` locally and run `streamlit run app.py` once to generate artifacts\n"
+            "- Then commit the `model_artifacts/` folder to your repo before deploying"
+        )
+        st.stop()
+
+    return _train_and_save()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PREDICTION
 # ══════════════════════════════════════════════════════════════════════════════
-
 def predict_match(
     model,
     df: pd.DataFrame,
@@ -346,61 +410,71 @@ def predict_match(
     rankings: pd.DataFrame | None = None,
     tournament: str = "FIFA World Cup",
 ) -> dict | None:
-
-    today      = pd.Timestamp.now()
-    hs         = _team_rolling_stats(df, home_team, today)
-    as_        = _team_rolling_stats(df, away_team, today)
-    h2h_raw    = _h2h_stats(df, home_team, away_team, today)
-    tw         = TOURNAMENT_WEIGHT.get(tournament, 1.0)
-
+ 
+    today   = pd.Timestamp.now()
+    hs      = _team_rolling_stats(df, home_team, today)
+    as_     = _team_rolling_stats(df, away_team, today)
+    h2h_raw = _h2h_stats(df, home_team, away_team, today)
+    tw      = TOURNAMENT_WEIGHT.get(tournament, 1.0)
+ 
     if hs["games"] == 0 and as_["games"] == 0:
         return None
-
+ 
     home_rank  = _get_ranking(home_team, today, rankings)
     away_rank  = _get_ranking(away_team, today, rankings)
     rank_delta = away_rank - home_rank
-
-    # ── Feature vector — order must exactly match build_features ──────────────
-    X = np.array([[
-        # Home form
-        hs["win_rate"],  hs["draw_rate"],  hs["loss_rate"],
-        hs["avg_gf"],    hs["avg_ga"],     hs["goal_diff"],  hs["games"],
-        # Away form
-        as_["win_rate"], as_["draw_rate"], as_["loss_rate"],
-        as_["avg_gf"],   as_["avg_ga"],   as_["goal_diff"],  as_["games"],
-        # Differentials
-        hs["win_rate"]  - as_["win_rate"],
-        hs["goal_diff"] - as_["goal_diff"],
-        hs["avg_gf"]    - as_["avg_gf"],
-        hs["avg_ga"]    - as_["avg_ga"],
-        # Head-to-head
-        h2h_raw["h2h_home_win_rate"],
-        h2h_raw["h2h_draw_rate"],
-        h2h_raw["h2h_away_win_rate"],
-        h2h_raw["h2h_total"],
-        # Context
-        tw,
-        int(neutral),
-        # Draw-signal features
-        # (hs["draw_rate"] + as_["draw_rate"]) / 2,
-        # hs["avg_gf"] + as_["avg_gf"],
-        abs(hs["win_rate"] - as_["win_rate"]),
-        # FIFA ranking features
-        home_rank,
-        away_rank,
-        rank_delta,
-    ]])
-
-    probs    = model.predict_proba(X)[0]
-    prob_map = dict(zip(label_encoder.classes_, probs))
-
-    # Build h2h counts for the UI
-    mask   = (
+ 
+    def _build_X(h, a, hr, ar, rd, nv):
+        """Build feature vector — order must exactly match build_features."""
+        return np.array([[
+            h["win_rate"],  h["draw_rate"],  h["loss_rate"],
+            h["avg_gf"],    h["avg_ga"],     h["goal_diff"],  h["games"],
+            a["win_rate"],  a["draw_rate"],  a["loss_rate"],
+            a["avg_gf"],    a["avg_ga"],     a["goal_diff"],  a["games"],
+            h["win_rate"]  - a["win_rate"],
+            h["goal_diff"] - a["goal_diff"],
+            h["avg_gf"]    - a["avg_gf"],
+            h["avg_ga"]    - a["avg_ga"],
+            h2h_raw["h2h_home_win_rate"],
+            h2h_raw["h2h_draw_rate"],
+            h2h_raw["h2h_away_win_rate"],
+            h2h_raw["h2h_total"],
+            tw,
+            int(nv),
+            abs(h["win_rate"] - a["win_rate"]),
+            hr, ar, rd,
+        ]])
+ 
+    if neutral:
+        # ── Neutral venue: run both perspectives and average to remove home bias
+        # Forward:  home_team as "home", away_team as "away"
+        # Reversed: away_team as "home", home_team as "away"
+        probs_fwd = model.predict_proba(_build_X(hs, as_,  home_rank, away_rank,  rank_delta, True))[0]
+        probs_rev = model.predict_proba(_build_X(as_, hs,  away_rank, home_rank, -rank_delta, True))[0]
+ 
+        classes   = label_encoder.classes_   # ['away_win', 'draw', 'home_win']
+        map_fwd   = dict(zip(classes, probs_fwd))
+        map_rev   = dict(zip(classes, probs_rev))
+ 
+        # In the reversed prediction home_win = away_team won, away_win = home_team won
+        home_win_prob = (map_fwd.get("home_win", 0) + map_rev.get("away_win", 0)) / 2
+        draw_prob     = (map_fwd.get("draw",     0) + map_rev.get("draw",     0)) / 2
+        away_win_prob = (map_fwd.get("away_win", 0) + map_rev.get("home_win", 0)) / 2
+    else:
+        # ── Non-neutral: home advantage is real, single prediction is correct
+        probs     = model.predict_proba(_build_X(hs, as_, home_rank, away_rank, rank_delta, False))[0]
+        prob_map  = dict(zip(label_encoder.classes_, probs))
+        home_win_prob = prob_map.get("home_win", 0.33)
+        draw_prob     = prob_map.get("draw",     0.33)
+        away_win_prob = prob_map.get("away_win", 0.34)
+ 
+    # H2H counts for UI
+    mask = (
         ((df["home_team"] == home_team) & (df["away_team"] == away_team)) |
         ((df["home_team"] == away_team) & (df["away_team"] == home_team))
     )
     h2h_df = df[mask]
-
+ 
     home_wins = draws = away_wins = 0
     for _, row in h2h_df.iterrows():
         if row["home_team"] == home_team:
@@ -411,11 +485,11 @@ def predict_match(
             if   row["outcome"] == "away_win": home_wins += 1
             elif row["outcome"] == "draw":     draws     += 1
             else:                              away_wins += 1
-
+ 
     return {
-        "home_win": prob_map.get("home_win", 0.33),
-        "draw":     prob_map.get("draw",     0.33),
-        "away_win": prob_map.get("away_win", 0.34),
+        "home_win": home_win_prob,
+        "draw":     draw_prob,
+        "away_win": away_win_prob,
         "h2h": {"home_wins": home_wins, "draws": draws, "away_wins": away_wins},
     }
 

@@ -67,11 +67,12 @@ with col_vs:
 with col2:
     st.markdown('<p class="section-header">✈️ Away / Team 2</p>', unsafe_allow_html=True)
     away_options = [t for t in TEAM_LIST if t != home_team]
-    away_team = st.selectbox("Select away team", away_options, index=away_options.index("Argentina"), key="away")
+    default_away = "Argentina" if "Argentina" in away_options else away_options[0]
+    away_team = st.selectbox("Select away team", away_options, index=away_options.index(default_away), key="away")
 
 # ── Predict ────────────────────────────────────────────────────────────────────
 st.markdown("<br>", unsafe_allow_html=True)
-predict_btn = st.button("🔮 Predict Match Outcome", type="primary", width="stretch")
+predict_btn = st.button("🔮 Predict Match Outcome", type="primary", use_container_width=True)
 
 if predict_btn or True:  # auto-run on load
     result = predict_match(model, df, home_team, away_team, neutral_venue, label_encoder, rankings)
@@ -108,7 +109,7 @@ if predict_btn or True:  # auto-run on load
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Outcome gauge ──────────────────────────────────────────────────────
+        # ── Outcome chart + H2H ───────────────────────────────────────────────
         col_chart, col_stats = st.columns([3, 2])
 
         with col_chart:
@@ -146,7 +147,7 @@ if predict_btn or True:  # auto-run on load
                 st.info("No recorded head-to-head matches.")
 
         # ── Team form ──────────────────────────────────────────────────────────
-        st.markdown('<p class="section-header">🔥 Recent Form (last 10 matches)</p>', unsafe_allow_html=True)
+        st.markdown('<p class="section-header">🔥 Recent Form (last 15 matches)</p>', unsafe_allow_html=True)
         f1, f2 = st.columns(2)
 
         home_stats = get_team_stats(df, home_team)
