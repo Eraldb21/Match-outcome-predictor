@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Byte-compiled / logs
+*.log
+
+# Streamlit cache
+.streamlit/
+
+# Ignore data and model artifacts (if you prefer to keep them local)
+results.csv
+fifa_rankings.csv
+
+# Ignore Python wheel/dist
+dist/
+build/
+
+# Environment files
+.env
