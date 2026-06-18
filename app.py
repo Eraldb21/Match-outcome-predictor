@@ -27,6 +27,14 @@ st.markdown("""
     .loss-card { border-left: 4px solid #ef4444; }
     .section-header { font-size: 1.1rem; font-weight: 600; color: #374151; margin: 1.5rem 0 0.8rem; }
     div[data-testid="stSelectbox"] label { font-weight: 600; font-size: 0.9rem; }
+
+    /* Hide Streamlit branding elements and GitHub links */
+    #MainMenu { visibility: hidden; }
+    header { visibility: hidden; }
+    footer { visibility: hidden; }
+    footer:after { content: "" !important; visibility: hidden; }
+    a[href*="github.com"] { display: none !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
