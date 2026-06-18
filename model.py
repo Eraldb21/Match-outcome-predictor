@@ -35,8 +35,9 @@ DATA_PATH     = "results.csv"
 RANKINGS_PATH = "fifa_rankings.csv"
 WINDOW        = 15   # rolling form window
 
-# ── Saved artifact paths (commit these to repo for zero-retraining deploys) ───
-ARTIFACTS_DIR    = "model_artifacts"
+# ── Saved artifact paths — relative to this file so they work on any machine ──
+_HERE            = os.path.dirname(os.path.abspath(__file__))
+ARTIFACTS_DIR    = os.path.join(_HERE, "model_artifacts")
 MODEL_FILE       = os.path.join(ARTIFACTS_DIR, "xgb_model.json")
 ENCODER_FILE     = os.path.join(ARTIFACTS_DIR, "label_encoder.pkl")
 FEATURE_COL_FILE = os.path.join(ARTIFACTS_DIR, "feature_cols.pkl")
@@ -400,6 +401,7 @@ def load_or_train_model():
 # ══════════════════════════════════════════════════════════════════════════════
 # PREDICTION
 # ══════════════════════════════════════════════════════════════════════════════
+
 def predict_match(
     model,
     df: pd.DataFrame,
@@ -410,20 +412,20 @@ def predict_match(
     rankings: pd.DataFrame | None = None,
     tournament: str = "FIFA World Cup",
 ) -> dict | None:
- 
+
     today   = pd.Timestamp.now()
     hs      = _team_rolling_stats(df, home_team, today)
     as_     = _team_rolling_stats(df, away_team, today)
     h2h_raw = _h2h_stats(df, home_team, away_team, today)
     tw      = TOURNAMENT_WEIGHT.get(tournament, 1.0)
- 
+
     if hs["games"] == 0 and as_["games"] == 0:
         return None
- 
+
     home_rank  = _get_ranking(home_team, today, rankings)
     away_rank  = _get_ranking(away_team, today, rankings)
     rank_delta = away_rank - home_rank
- 
+
     def _build_X(h, a, hr, ar, rd, nv):
         """Build feature vector — order must exactly match build_features."""
         return np.array([[
@@ -444,18 +446,18 @@ def predict_match(
             abs(h["win_rate"] - a["win_rate"]),
             hr, ar, rd,
         ]])
- 
+
     if neutral:
         # ── Neutral venue: run both perspectives and average to remove home bias
         # Forward:  home_team as "home", away_team as "away"
         # Reversed: away_team as "home", home_team as "away"
         probs_fwd = model.predict_proba(_build_X(hs, as_,  home_rank, away_rank,  rank_delta, True))[0]
         probs_rev = model.predict_proba(_build_X(as_, hs,  away_rank, home_rank, -rank_delta, True))[0]
- 
+
         classes   = label_encoder.classes_   # ['away_win', 'draw', 'home_win']
         map_fwd   = dict(zip(classes, probs_fwd))
         map_rev   = dict(zip(classes, probs_rev))
- 
+
         # In the reversed prediction home_win = away_team won, away_win = home_team won
         home_win_prob = (map_fwd.get("home_win", 0) + map_rev.get("away_win", 0)) / 2
         draw_prob     = (map_fwd.get("draw",     0) + map_rev.get("draw",     0)) / 2
@@ -467,14 +469,14 @@ def predict_match(
         home_win_prob = prob_map.get("home_win", 0.33)
         draw_prob     = prob_map.get("draw",     0.33)
         away_win_prob = prob_map.get("away_win", 0.34)
- 
+
     # H2H counts for UI
     mask = (
         ((df["home_team"] == home_team) & (df["away_team"] == away_team)) |
         ((df["home_team"] == away_team) & (df["away_team"] == home_team))
     )
     h2h_df = df[mask]
- 
+
     home_wins = draws = away_wins = 0
     for _, row in h2h_df.iterrows():
         if row["home_team"] == home_team:
@@ -485,7 +487,7 @@ def predict_match(
             if   row["outcome"] == "away_win": home_wins += 1
             elif row["outcome"] == "draw":     draws     += 1
             else:                              away_wins += 1
- 
+
     return {
         "home_win": home_win_prob,
         "draw":     draw_prob,
