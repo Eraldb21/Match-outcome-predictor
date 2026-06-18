@@ -28,14 +28,22 @@ st.markdown("""
     .section-header { font-size: 1.1rem; font-weight: 600; color: #374151; margin: 1.5rem 0 0.8rem; }
     div[data-testid="stSelectbox"] label { font-weight: 600; font-size: 0.9rem; }
 
-    /* Hide Streamlit branding elements and GitHub links */
-    #MainMenu { visibility: hidden; }
-    header { visibility: hidden; }
-    footer { visibility: hidden; }
-    footer:after { content: "" !important; visibility: hidden; }
-    a[href*="github.com"] { display: none !important; }
+    /* Hide Streamlit header/menu/footer */
+    #MainMenu { opacity: 0 !important; visibility: hidden !important; height: 0 !important; pointer-events: none !important; }
+    header, header[role="banner"] { opacity: 0 !important; visibility: hidden !important; height: 0 !important; margin: 0 !important; padding: 0 !important; pointer-events: none !important; }
+    footer, footer * { display: none !important; visibility: hidden !important; height: 0 !important; pointer-events: none !important; }
+
+    /* Hide anchors to GitHub / Streamlit share */
+    a[href*="github.com"], a[href*="streamlit.io"], a[href*="share.streamlit.io"] { display: none !important; visibility: hidden !important; pointer-events: none !important; }
+
+    /* Hide any ancestor element that contains a GitHub link (modern browsers supporting :has()) */
+    div:has(a[href*="github.com"]), section:has(a[href*="github.com"]), footer:has(a[href*="github.com"]) { display: none !important; visibility: hidden !important; }
+
+    /* Fallback overlay to cover the bottom-right badge if it can't be targeted directly */
+    #__hide_github_overlay__ { position: fixed; right: 0; bottom: 0; width: 320px; height: 36px; background: white; z-index: 9999; pointer-events: none; }
 
 </style>
+<div id="__hide_github_overlay__"></div>
 """, unsafe_allow_html=True)
 
 # ── Header ─────────────────────────────────────────────────────────────────────
